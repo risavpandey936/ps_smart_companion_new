@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env
+.env.*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.db
+*.db-journal
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project specific
+backend/neuroassist.db
+backend/.env*
+frontend/.env*
+.env*
+**/ .env*

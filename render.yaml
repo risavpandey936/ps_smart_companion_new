@@ -1,0 +1,32 @@
+services:
+  # Backend Web Service
+  - type: web
+    name: neuroassist-backend
+    env: python
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false # Set this in the Render dashboard
+      - key: SECRET_KEY
+        generateValue: true
+      - key: PYTHON_VERSION
+        value: 3.11.0
+    disk:
+      name: neuroassist-db
+      mountPath: /data
+      sizeGB: 1
+
+  # Frontend Static Site
+  - type: static
+    name: neuroassist-frontend
+    env: static
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: frontend/dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: neuroassist-backend
+          property: url
+        suffix: /api
