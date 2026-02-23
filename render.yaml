@@ -1,26 +1,23 @@
 services:
-  # Backend Web Service
+  # ── Backend (FastAPI RAG) ──────────────────────────────────────────────
   - type: web
     name: neuroassist-backend
     env: python
+    region: oregon
+    plan: free
     buildCommand: pip install -r backend/requirements.txt
     startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: GROQ_API_KEY
-        sync: false # Set this in the Render dashboard
-      - key: SECRET_KEY
-        generateValue: true
+        sync: false          # ← Set this manually in Render dashboard
       - key: PYTHON_VERSION
-        value: 3.11.0
-    disk:
-      name: neuroassist-db
-      mountPath: /data
-      sizeGB: 1
+        value: "3.11.0"
 
-  # Frontend Static Site
+  # ── Frontend (React/Vite Static Site) ─────────────────────────────────
   - type: static
     name: neuroassist-frontend
     env: static
+    region: oregon
     buildCommand: cd frontend && npm install && npm run build
     staticPublishPath: frontend/dist
     envVars:
@@ -29,4 +26,11 @@ services:
           type: web
           name: neuroassist-backend
           property: url
-        suffix: /api
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: no-cache
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

@@ -1,10 +1,10 @@
 fastapi
-uvicorn
+uvicorn[standard]
 python-dotenv
 groq
 pydantic
-python-jose[cryptography]
-passlib
-sqlalchemy
 python-multipart
-bcrypt
+PyMuPDF
+faiss-cpu
+sentence-transformers
+numpy

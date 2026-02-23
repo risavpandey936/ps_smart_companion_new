@@ -1,33 +1,46 @@
-# Python
+# ── Python ──────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 venv/
 .venv/
+env/
+
+# ── Environment / Secrets (NEVER commit these) ──────────────────────────
 .env
 .env.*
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
+backend/.env
+backend/.env.*
+frontend/.env
+frontend/.env.*
+
+# ── Database (old, not used anymore) ────────────────────────────────────
 *.db
 *.db-journal
+backend/neuroassist.db
 
-# Node
+# ── Node / Frontend ───────────────────────────────────────────────────────
 node_modules/
 dist/
 dist-ssr/
 *.local
 
-# IDE
+# ── IDE / Editor ──────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
+*.DS_Store
+Thumbs.db
 
-# Project specific
-backend/neuroassist.db
-backend/.env*
-frontend/.env*
-.env*
-**/ .env*
+# ── Test / Dev scripts (not needed in production) ─────────────────────────
+backend/test_*.py
+backend/view_users.py
+backend/test_key.py
+TESTING_REPORT.md
+FINAL_TEST_REPORT.md

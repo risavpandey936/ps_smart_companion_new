@@ -1,116 +1,120 @@
-from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel
-from typing import List, Optional
 import os
+import io
 import json
-import datetime
-from datetime import timedelta
+import time
+import uuid
+import hashlib
+import numpy as np
+from typing import List, Optional
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from dotenv import load_dotenv
 from groq import Groq
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from sqlalchemy import create_engine, Column, Integer, String
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
 
-# Load environment variables
+import fitz  # PyMuPDF
+import faiss
+from sentence_transformers import SentenceTransformer
+
+# ─────────────────────────────────────────
+# Config
+# ─────────────────────────────────────────
 load_dotenv()
 
-# Database Setup
-DATABASE_PATH = os.environ.get("DATABASE_URL", "sqlite:///./neuroassist.db")
-# If on Render and using a Disk, we usually point to /data/neuroassist.db
-if os.path.exists("/data") and "DATABASE_URL" not in os.environ:
-    DATABASE_PATH = "sqlite:////data/neuroassist.db"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_MODEL = "llama-3.3-70b-versatile"
+MAX_PAGES = 130
+CHUNK_SIZE = 500       # characters per chunk
+CHUNK_OVERLAP = 80     # overlap characters between chunks
+TOP_K = 5              # top chunks to retrieve
 
-engine = create_engine(DATABASE_PATH, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+client = Groq(api_key=GROQ_API_KEY)
 
-# Security Configuration
-SECRET_KEY = os.environ.get("SECRET_KEY", "your-very-secret-key-change-this-in-production")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 # 24 hours
+# ─────────────────────────────────────────
+# Embedding model (runs locally, free)
+# ─────────────────────────────────────────
+print("⏳ Loading embedding model...")
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+print("✅ Embedding model loaded.")
 
-pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
+# ─────────────────────────────────────────
+# In-memory session store
+# session_id -> { chunks, index, metadata }
+# ─────────────────────────────────────────
+sessions: dict = {}
 
-# Models
-class UserDB(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
+# ─────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────
 
-Base.metadata.create_all(bind=engine)
+def extract_text_from_pdf(pdf_bytes: bytes) -> tuple[list[str], int]:
+    """Return list of page-text strings and total page count."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    total_pages = doc.page_count
+    pages = []
+    for i, page in enumerate(doc):
+        pages.append(page.get_text())
+    doc.close()
+    return pages, total_pages
 
-# Pydantic Schemas
-class UserCreate(BaseModel):
-    username: str
-    password: str
 
-class UserResponse(BaseModel):
-    id: int
-    username: str
-    class Config:
-        from_attributes = True
+def chunk_text(pages: list[str]) -> list[dict]:
+    """Split pages into overlapping chunks, keeping page metadata."""
+    chunks = []
+    for page_num, page_text in enumerate(pages, start=1):
+        page_text = page_text.strip()
+        if not page_text:
+            continue
+        start = 0
+        while start < len(page_text):
+            end = start + CHUNK_SIZE
+            chunk = page_text[start:end]
+            if chunk.strip():
+                chunks.append({
+                    "text": chunk,
+                    "page": page_num,
+                    "chunk_id": len(chunks)
+                })
+            start += CHUNK_SIZE - CHUNK_OVERLAP
+    return chunks
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str
 
-class QueryRequest(BaseModel):
-    query: str
-    condition_context: str = "general"
+def build_faiss_index(chunks: list[dict]):
+    """Embed chunks and build a FAISS flat L2 index."""
+    texts = [c["text"] for c in chunks]
+    embeddings = embedder.encode(texts, show_progress_bar=False, batch_size=32)
+    embeddings = np.array(embeddings, dtype="float32")
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(embeddings)
+    return index, embeddings
 
-class TaskRequest(BaseModel):
-    task_description: str
 
-class TextRequest(BaseModel):
-    text: str
+def retrieve_top_chunks(query: str, chunks: list[dict], index, top_k: int = TOP_K) -> list[dict]:
+    """Embed query and return top-k most similar chunks."""
+    q_emb = embedder.encode([query], show_progress_bar=False)
+    q_emb = np.array(q_emb, dtype="float32")
+    distances, indices = index.search(q_emb, top_k)
+    results = []
+    for idx in indices[0]:
+        if idx < len(chunks):
+            results.append(chunks[idx])
+    return results
 
-# Helper Functions
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+def build_context(retrieved: list[dict]) -> str:
+    """Combine retrieved chunks into a single context block."""
+    parts = []
+    for item in retrieved:
+        parts.append(f"[Page {item['page']}]\n{item['text']}")
+    return "\n\n---\n\n".join(parts)
 
-def get_password_hash(password):
-    return pwd_context.hash(password)
 
-def create_access_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    user = db.query(UserDB).filter(UserDB.username == username).first()
-    if user is None:
-        raise credentials_exception
-    return user
-
-# App Initialization
-app = FastAPI(title="Neurodiversity Support AI Backend")
+# ─────────────────────────────────────────
+# FastAPI App
+# ─────────────────────────────────────────
+app = FastAPI(title="PDF RAG Chatbot API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -120,134 +124,179 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-CURRENT_MODEL = "llama-3.3-70b-versatile"
 
-# Auth Endpoints
-@app.post("/api/register", response_model=UserResponse)
-def register(user: UserCreate, db: Session = Depends(get_db)):
-    db_user = db.query(UserDB).filter(UserDB.username == user.username).first()
-    if db_user:
-        raise HTTPException(status_code=400, detail="Username already registered")
-    hashed_pass = get_password_hash(user.password)
-    new_user = UserDB(username=user.username, hashed_password=hashed_pass)
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    return new_user
+# ─────────────────────────────────────────
+# Schemas
+# ─────────────────────────────────────────
+class ChatRequest(BaseModel):
+    session_id: str
+    question: str
+    chat_history: Optional[List[dict]] = []
 
-@app.post("/api/login")
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(UserDB).filter(UserDB.username == form_data.username).first()
-    if not user or not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    access_token = create_access_token(data={"sub": user.username})
-    return {"access_token": access_token, "token_type": "bearer", "username": user.username}
 
-# Admin Endpoint (Owner Only)
-@app.get("/api/admin/users")
-def get_all_users(admin_token: str, db: Session = Depends(get_db)):
-    # Simple security: check against a secret env variable
-    secret = os.environ.get("ADMIN_SECRET_KEY", "hackathon_owner_2026")
-    if admin_token != secret:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    users = db.query(UserDB).all()
-    return [{"id": u.id, "username": u.username} for u in users]
+class SessionInfo(BaseModel):
+    session_id: str
+    filename: str
+    total_pages: int
+    total_chunks: int
+    created_at: float
 
-# Protected AI Endpoints
+
+# ─────────────────────────────────────────
+# Endpoints
+# ─────────────────────────────────────────
+
 @app.get("/")
-def read_root():
-    return {"message": "Neurodiversity Support AI Backend is running"}
+def root():
+    return {"message": "PDF RAG Chatbot API is running 🚀"}
+
+
+@app.post("/api/upload")
+async def upload_pdf(file: UploadFile = File(...)):
+    """Upload a PDF, extract text, build FAISS index, return session_id."""
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+
+    pdf_bytes = await file.read()
+
+    # Extract text
+    try:
+        pages, total_pages = extract_text_from_pdf(pdf_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Failed to parse PDF: {str(e)}")
+
+    if total_pages > MAX_PAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PDF has {total_pages} pages. Maximum allowed is {MAX_PAGES}."
+        )
+
+    # Chunk
+    chunks = chunk_text(pages)
+    if not chunks:
+        raise HTTPException(status_code=422, detail="No readable text found in the PDF.")
+
+    # Build FAISS index
+    try:
+        index, _ = build_faiss_index(chunks)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to build search index: {str(e)}")
+
+    # Store session
+    session_id = str(uuid.uuid4())
+    sessions[session_id] = {
+        "chunks": chunks,
+        "index": index,
+        "filename": file.filename,
+        "total_pages": total_pages,
+        "total_chunks": len(chunks),
+        "created_at": time.time(),
+    }
+
+    return {
+        "session_id": session_id,
+        "filename": file.filename,
+        "total_pages": total_pages,
+        "total_chunks": len(chunks),
+        "message": f"✅ PDF processed successfully! {total_pages} pages, {len(chunks)} chunks indexed."
+    }
+
 
 @app.post("/api/chat")
-def chat_endpoint(request: QueryRequest, current_user: UserDB = Depends(get_current_user)):
+def chat(req: ChatRequest):
+    """Ask a question against the uploaded PDF."""
+    session = sessions.get(req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found. Please upload a PDF first.")
+
+    chunks = session["chunks"]
+    index = session["index"]
+    filename = session["filename"]
+
+    # Retrieve relevant chunks
+    retrieved = retrieve_top_chunks(req.question, chunks, index, top_k=TOP_K)
+    context = build_context(retrieved)
+
+    # Build messages
     system_prompt = (
-        "You are an empathetic AI assistant designed to help neurodivergent individuals (Autism, ADHD, Dyslexia). "
-        "Your goal is to provide clear, concise, and supportive answers. "
-        "Use bullet points and simple language."
+        f"You are a precise and helpful AI assistant. You answer questions strictly based on the content "
+        f"of the PDF document '{filename}'.\n\n"
+        "RULES:\n"
+        "- Answer ONLY based on the provided context from the document.\n"
+        "- If the answer is not found in the context, say: 'I couldn't find this information in the document.'\n"
+        "- Always mention the page number(s) where you found the information.\n"
+        "- Be concise but complete.\n"
+        "- Use bullet points or numbered lists when appropriate.\n\n"
+        f"DOCUMENT CONTEXT:\n{context}"
     )
-    
-    if request.condition_context == "adhd":
-        system_prompt += " Focus on breaking things down, offering dopamine-friendly quick wins."
-    elif request.condition_context == "dyslexia":
-        system_prompt += " Use plain language, short sentences. Format for high readability."
-    elif request.condition_context == "autism":
-        system_prompt += " Be literal, clear, and avoid ambiguous language."
+
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # Add chat history (last 6 turns for context)
+    for h in (req.chat_history or [])[-6:]:
+        if h.get("role") in ("user", "assistant") and h.get("content"):
+            messages.append({"role": h["role"], "content": h["content"]})
+
+    messages.append({"role": "user", "content": req.question})
 
     try:
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": request.query}
-            ],
-            model=CURRENT_MODEL,
+        completion = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=1024,
         )
-        return {"response": chat_completion.choices[0].message.content}
+        answer = completion.choices[0].message.content
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"LLM error: {str(e)}")
 
-@app.post("/api/breakdown-task")
-def breakdown_task(request: TaskRequest, current_user: UserDB = Depends(get_current_user)):
-    system_prompt = (
-        "You are an executive function assistant. Break down the following task into very small, actionable steps (5-15 mins each). "
-        "Return the response as a JSON object with a 'steps' key containing a list of strings."
-    )
-    
-    try:
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Break down this task: {request.task_description}"}
-            ],
-            model=CURRENT_MODEL,
-            response_format={"type": "json_object"}
-        )
-        return json.loads(chat_completion.choices[0].message.content)
-    except Exception:
-        # Fallback
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt + " Just list the steps."},
-                {"role": "user", "content": f"Break down this task: {request.task_description}"}
-            ],
-            model=CURRENT_MODEL,
-        )
-        return {"steps": [line.strip() for line in chat_completion.choices[0].message.content.split('\n') if line.strip()]}
+    # Source pages for reference
+    source_pages = sorted(set(c["page"] for c in retrieved))
 
-@app.post("/api/simplify-text")
-def simplify_text(request: TextRequest, current_user: UserDB = Depends(get_current_user)):
-    system_prompt = "You are a reading assistant for someone with Dyslexia. Rewrite text to be easier to read using simple words and short sentences."
-    try:
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": request.text}
-            ],
-            model=CURRENT_MODEL,
-        )
-        return {"simplified_text": chat_completion.choices[0].message.content}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "answer": answer,
+        "source_pages": source_pages,
+        "chunks_used": len(retrieved),
+    }
 
-@app.post("/api/time-estimator")
-def time_estimator(request: TaskRequest, current_user: UserDB = Depends(get_current_user)):
-    system_prompt = "You are a time-management expert. Provide realistic time estimates for tasks and explain potential 'time sinks'."
-    try:
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": request.task_description}
-            ],
-            model=CURRENT_MODEL,
-        )
-        return {"estimation": chat_completion.choices[0].message.content}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/session/{session_id}")
+def get_session(session_id: str):
+    """Get info about a session."""
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return {
+        "session_id": session_id,
+        "filename": session["filename"],
+        "total_pages": session["total_pages"],
+        "total_chunks": session["total_chunks"],
+        "created_at": session["created_at"],
+    }
+
+
+@app.delete("/api/session/{session_id}")
+def delete_session(session_id: str):
+    """Delete a session and free memory."""
+    if session_id in sessions:
+        del sessions[session_id]
+        return {"message": "Session deleted."}
+    raise HTTPException(status_code=404, detail="Session not found.")
+
+
+@app.get("/api/sessions")
+def list_sessions():
+    """List all active sessions."""
+    return [
+        {
+            "session_id": sid,
+            "filename": s["filename"],
+            "total_pages": s["total_pages"],
+            "created_at": s["created_at"],
+        }
+        for sid, s in sessions.items()
+    ]
+
 
 if __name__ == "__main__":
     import uvicorn
