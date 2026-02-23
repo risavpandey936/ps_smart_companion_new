@@ -139,7 +139,7 @@ class SessionInfo(BaseModel):
 # Endpoints
 # ─────────────────────────────────────────
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {"message": "PDF RAG Chatbot API is running 🚀"}
 
