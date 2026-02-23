@@ -12,30 +12,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from groq import Groq
-
 import fitz  # PyMuPDF
 import faiss
-from sentence_transformers import SentenceTransformer
-
+from fastembed import TextEmbedding
 # ─────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────
 load_dotenv()
-
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_MODEL = "llama-3.3-70b-versatile"
 MAX_PAGES = 130
 CHUNK_SIZE = 500       # characters per chunk
 CHUNK_OVERLAP = 80     # overlap characters between chunks
 TOP_K = 5              # top chunks to retrieve
-
 client = Groq(api_key=GROQ_API_KEY)
 
 # ─────────────────────────────────────────
 # Embedding model (runs locally, free)
 # ─────────────────────────────────────────
 print("⏳ Loading embedding model...")
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 print("✅ Embedding model loaded.")
 
 # ─────────────────────────────────────────
@@ -43,7 +39,6 @@ print("✅ Embedding model loaded.")
 # session_id -> { chunks, index, metadata }
 # ─────────────────────────────────────────
 sessions: dict = {}
-
 # ─────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────
@@ -83,8 +78,7 @@ def chunk_text(pages: list[str]) -> list[dict]:
 def build_faiss_index(chunks: list[dict]):
     """Embed chunks and build a FAISS flat L2 index."""
     texts = [c["text"] for c in chunks]
-    embeddings = embedder.encode(texts, show_progress_bar=False, batch_size=32)
-    embeddings = np.array(embeddings, dtype="float32")
+    embeddings = np.array(list(embedder.embed(texts)), dtype="float32")
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
     index.add(embeddings)
@@ -93,8 +87,7 @@ def build_faiss_index(chunks: list[dict]):
 
 def retrieve_top_chunks(query: str, chunks: list[dict], index, top_k: int = TOP_K) -> list[dict]:
     """Embed query and return top-k most similar chunks."""
-    q_emb = embedder.encode([query], show_progress_bar=False)
-    q_emb = np.array(q_emb, dtype="float32")
+    q_emb = np.array(list(embedder.embed([query])), dtype="float32")
     distances, indices = index.search(q_emb, top_k)
     results = []
     for idx in indices[0]:
