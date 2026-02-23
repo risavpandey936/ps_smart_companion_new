@@ -23,7 +23,7 @@ from fastembed import TextEmbedding
 load_dotenv()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_MODEL = "llama-3.3-70b-versatile"
-MAX_PAGES = 50         # keep low to avoid OOM on 512MB free tier
+MAX_PAGES = 50         # keep low to avoid OOM on 512MB Render free tier
 CHUNK_SIZE = 600       # slightly larger = fewer chunks = faster embedding
 CHUNK_OVERLAP = 80     # overlap characters between chunks
 TOP_K = 5              # top chunks to retrieve
