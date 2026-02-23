@@ -4,6 +4,8 @@ import json
 import time
 import uuid
 import hashlib
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from typing import List, Optional
 
@@ -21,10 +23,11 @@ from fastembed import TextEmbedding
 load_dotenv()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_MODEL = "llama-3.3-70b-versatile"
-MAX_PAGES = 130
-CHUNK_SIZE = 500       # characters per chunk
+MAX_PAGES = 50         # keep low to avoid OOM on 512MB free tier
+CHUNK_SIZE = 600       # slightly larger = fewer chunks = faster embedding
 CHUNK_OVERLAP = 80     # overlap characters between chunks
 TOP_K = 5              # top chunks to retrieve
+EMBED_BATCH = 32       # embed this many chunks at a time to keep RAM flat
 client = Groq(api_key=GROQ_API_KEY)
 
 # ─────────────────────────────────────────
@@ -76,9 +79,15 @@ def chunk_text(pages: list[str]) -> list[dict]:
 
 
 def build_faiss_index(chunks: list[dict]):
-    """Embed chunks and build a FAISS flat L2 index."""
+    """Embed chunks in batches and build a FAISS flat L2 index."""
     texts = [c["text"] for c in chunks]
-    embeddings = np.array(list(embedder.embed(texts)), dtype="float32")
+    all_embeddings = []
+    # Process in small batches to keep memory usage flat
+    for i in range(0, len(texts), EMBED_BATCH):
+        batch = texts[i : i + EMBED_BATCH]
+        batch_emb = np.array(list(embedder.embed(batch)), dtype="float32")
+        all_embeddings.append(batch_emb)
+    embeddings = np.vstack(all_embeddings)
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
     index.add(embeddings)
@@ -161,7 +170,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     if total_pages > MAX_PAGES:
         raise HTTPException(
             status_code=400,
-            detail=f"PDF has {total_pages} pages. Maximum allowed is {MAX_PAGES}."
+            detail=f"PDF has {total_pages} pages. Maximum allowed is {MAX_PAGES}. Please upload a shorter document."
         )
 
     # Chunk
@@ -169,9 +178,11 @@ async def upload_pdf(file: UploadFile = File(...)):
     if not chunks:
         raise HTTPException(status_code=422, detail="No readable text found in the PDF.")
 
-    # Build FAISS index
+    # Build FAISS index in a thread pool (CPU-bound, avoids blocking event loop / timeout)
     try:
-        index, _ = build_faiss_index(chunks)
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            index, _ = await loop.run_in_executor(pool, build_faiss_index, chunks)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to build search index: {str(e)}")
 
