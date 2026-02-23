@@ -12,6 +12,7 @@ RUN npm run build
 # Step 2: Serve with Nginx
 FROM nginx:stable-alpine as production-stage
 COPY --from=build-stage /app/dist /usr/share/nginx/html
-# Copy a custom nginx config if you have one, otherwise use default
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
+
+# We use a shell command to replace the listen port in the default nginx config
+# This allows the app to run on the port provided by the hosting environment (Railway)
+CMD ["sh", "-c", "sed -i 's/listen[[:space:]]*80;/listen '\"$PORT\"';/g' /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
