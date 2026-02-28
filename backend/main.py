@@ -11,6 +11,8 @@ from typing import List, Optional
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from groq import Groq
@@ -300,6 +302,29 @@ def list_sessions():
         }
         for sid, s in sessions.items()
     ]
+
+
+# ─────────────────────────────────────────
+# Serve Static Frontend directly from FastAPI
+# ─────────────────────────────────────────
+static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+if os.path.exists(static_dir):
+    app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
+    
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+            
+        file_path = os.path.join(static_dir, full_path)
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        
+        index_path = os.path.join(static_dir, "index.html")
+        if os.path.exists(index_path):
+            return FileResponse(index_path)
+            
+        return {"message": "Frontend not built or missing."}
 
 
 if __name__ == "__main__":

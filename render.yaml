@@ -1,34 +1,11 @@
 services:
-  # ── Backend (FastAPI RAG) ──────────────────────────────────────────────
+  # ── Monolithic App (FastAPI Backend + React Frontend) ───────────────
   - type: web
-    name: neuroassist-backend
+    name: docmind-rag-chatbot
     env: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    region: oregon
+    dockerfilePath: ./Dockerfile
+    region: oregon # or whichever region you prefer
     plan: free
     envVars:
       - key: GROQ_API_KEY
         sync: false          # ← Set this manually in Render dashboard
-
-  # ── Frontend (React/Vite Static Site) ─────────────────────────────────
-  - type: static
-    name: neuroassist-frontend
-    env: static
-    region: oregon
-    buildCommand: cd frontend && npm install && npm run build
-    staticPublishPath: frontend/dist
-    envVars:
-      - key: VITE_API_URL
-        fromService:
-          type: web
-          name: neuroassist-backend
-          property: url
-    headers:
-      - path: /*
-        name: Cache-Control
-        value: no-cache
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html

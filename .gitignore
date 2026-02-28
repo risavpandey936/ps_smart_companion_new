@@ -42,5 +42,6 @@ Thumbs.db
 backend/test_*.py
 backend/view_users.py
 backend/test_key.py
+backend/*.pdf
 TESTING_REPORT.md
 FINAL_TEST_REPORT.md

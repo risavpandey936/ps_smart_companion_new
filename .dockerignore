@@ -1,0 +1,11 @@
+.git
+.gitignore
+node_modules
+__pycache__
+*.pyc
+.env
+.DS_Store
+frontend/dist
+backend/neuroassist.db
+backend/test.pdf
+backend/test_e2e.py
