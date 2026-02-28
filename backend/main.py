@@ -150,8 +150,8 @@ class SessionInfo(BaseModel):
 # Endpoints
 # ─────────────────────────────────────────
 
-@app.api_route("/", methods=["GET", "HEAD"])
-def root():
+@app.api_route("/api/health", methods=["GET", "HEAD"])
+def health_check():
     return {"message": "PDF RAG Chatbot API is running 🚀"}
 
 
