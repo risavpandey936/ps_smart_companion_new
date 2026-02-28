@@ -29,14 +29,14 @@ MAX_PAGES = 130        # max pages per PDF upload
 CHUNK_SIZE = 600       # slightly larger = fewer chunks = faster embedding
 CHUNK_OVERLAP = 80     # overlap characters between chunks
 TOP_K = 5              # top chunks to retrieve
-EMBED_BATCH = 32       # embed this many chunks at a time to keep RAM flat
+EMBED_BATCH = 16       # embed this many chunks at a time to keep RAM flat
 client = Groq(api_key=GROQ_API_KEY)
 
 # ─────────────────────────────────────────
 # Embedding model (runs locally, free)
 # ─────────────────────────────────────────
 print("⏳ Loading embedding model...")
-embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5", threads=1)
 print("✅ Embedding model loaded.")
 
 # ─────────────────────────────────────────
